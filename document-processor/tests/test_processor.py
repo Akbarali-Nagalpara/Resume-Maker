@@ -93,5 +93,66 @@ def test_api_rejects_unsupported():
     assert response.status_code == 400
 
 
+def test_bullets_are_never_headings():
+    from app.utils import classifier as clf
+
+    assert not clf.is_section_heading("- AWS CERTIFIED SOLUTIONS ARCHITECT", seen_known=True)
+    assert not clf.is_section_heading(
+        "- Mentored interns on EDUCATION FIRST principles", seen_known=True
+    )
+    assert clf.is_section_heading("WORK EXPERIENCE")
+    assert clf.is_section_heading("Technical Skills")
+    assert not clf.is_section_heading(
+        "Mentored interns on EDUCATION FIRST principles", seen_known=True
+    )
+
+
+def test_adversarial_mapping(tmp_path):
+    """Bullets with ALL-CAPS / keyword text must stay in their section."""
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.pdfgen.canvas import Canvas
+
+    from app.parsers import pdf_parser
+
+    pdf = str(tmp_path / "adversarial.pdf")
+    c = Canvas(pdf, pagesize=LETTER)
+    y = 730
+
+    def line(text, font="Helvetica", size=10):
+        nonlocal y
+        c.setFont(font, size)
+        c.drawString(72, y, text)
+        y -= size + 4
+
+    line("AKBARALI NAGALPARA", "Helvetica-Bold", 20)
+    line("akbarali@example.com")
+    y -= 8
+    line("EXPERIENCE", "Helvetica-Bold", 11)
+    line("Backend Engineer @ Acme Corp", "Helvetica-Bold", 10)
+    line("2023 - Present")
+    line("- Optimized high-traffic Spring Boot API endpoints")
+    line("- AWS CERTIFIED SOLUTIONS ARCHITECT")
+    line("- Mentored interns on EDUCATION FIRST principles")
+    line("- Shipped features")
+    line("EDUCATION", "Helvetica-Bold", 11)
+    line("B.Tech Computer Science", "Helvetica-Bold", 10)
+    line("Pune University")
+    line("2019 - 2023")
+    c.save()
+
+    with open(pdf, "rb") as fh:
+        result = pdf_parser.parse_pdf(fh.read(), "adversarial.pdf")
+    keys = [s.key for s in result.sections]
+    assert keys == ["experience", "education"], keys
+    assert len(result.content.experience) == 1
+    assert result.content.experience[0].bullets == [
+        "Optimized high-traffic Spring Boot API endpoints",
+        "AWS CERTIFIED SOLUTIONS ARCHITECT",
+        "Mentored interns on EDUCATION FIRST principles",
+        "Shipped features",
+    ]
+    assert result.content.education[0].degree == "B.Tech Computer Science"
+
+
 def test_api_health():
     assert client.get("/health").json()["status"] == "UP"

@@ -21,13 +21,32 @@ public final class SampleResumes {
   }
 
   public static Path docxSample(Path directory) throws IOException {
-    return docxSample(directory, "sample-resume.docx", false, false, false);
+    return docxSample(directory, "sample-resume.docx", false, false, false, true);
   }
 
   public static Path docxSample(
       Path directory, String filename, boolean twoColumn, boolean multiPage, boolean withTable)
       throws IOException {
+    return docxSample(directory, filename, twoColumn, multiPage, withTable, false);
+  }
+
+  public static Path docxSample(
+      Path directory,
+      String filename,
+      boolean twoColumn,
+      boolean multiPage,
+      boolean withTable,
+      boolean withHeaderFooter)
+      throws IOException {
     XWPFDocument document = new XWPFDocument();
+    if (withHeaderFooter) {
+      var header = document.createHeader(
+          org.apache.poi.wp.usermodel.HeaderFooterType.DEFAULT);
+      header.createParagraph().createRun().setText("Maya Chen — Resume");
+      var footer = document.createFooter(
+          org.apache.poi.wp.usermodel.HeaderFooterType.DEFAULT);
+      footer.createParagraph().createRun().setText("Page");
+    }
     addParagraph(document, "Maya Chen", true, 22.0);
     addParagraph(document, "Senior Product Engineer", false, 12.0);
     addParagraph(document, "maya.chen@example.com | +1 415 555 0142 | San Francisco, CA", false,
@@ -80,6 +99,11 @@ public final class SampleResumes {
   }
 
   public static Path pdfSample(Path directory) throws IOException {
+    return pdfSample(directory, "sample-resume.pdf", false, false);
+  }
+
+  public static Path pdfSample(Path directory, String filename, boolean twoColumn,
+      boolean multiPage) throws IOException {
     PDType1Font bold = new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD);
     PDType1Font regular = new PDType1Font(Standard14Fonts.FontName.HELVETICA);
     try (PDDocument document = new PDDocument()) {
@@ -102,11 +126,24 @@ public final class SampleResumes {
         y = pdfLine(stream, "Senior Product Engineer @ Northstar Labs", bold, 10, 72, y);
         y = pdfLine(stream, "2022 - Present", regular, 10, 72, y);
         y = pdfLine(stream, "- Led delivery of a workflow platform.", regular, 10, 72, y);
+        if (twoColumn) {
+          // Right column band: skills repeated far right to force two bands.
+          pdfLine(stream, "LANGUAGES", bold, 11, 330, 620);
+          pdfLine(stream, "English | Hindi", regular, 10, 330, 606);
+          pdfLine(stream, "Java | Go", regular, 10, 330, 592);
+        }
         y = pdfLine(stream, "EDUCATION", bold, 11, 72, y);
         y = pdfLine(stream, "B.S. Computer Science", bold, 10, 72, y);
         pdfLine(stream, "University of California, Davis", regular, 10, 72, y);
       }
-      Path file = directory.resolve("sample-resume.pdf");
+      if (multiPage) {
+        PDPage second = new PDPage(PDRectangle.LETTER);
+        document.addPage(second);
+        try (PDPageContentStream stream2 = new PDPageContentStream(document, second)) {
+          pdfLine(stream2, "References available on request.", regular, 10, 72, 700);
+        }
+      }
+      Path file = directory.resolve(filename);
       document.save(file.toFile());
       return file;
     }

@@ -15,6 +15,8 @@ export interface PersonalInfo {
   phone: string;
   location: string;
   website: string;
+  github: string;
+  linkedin: string;
 }
 
 export type PersonalField = keyof PersonalInfo;

@@ -1,11 +1,14 @@
 package com.resumeflow.resume.service;
 
+import com.resumeflow.exception.ResumeParseException;
 import com.resumeflow.resume.generator.DocxToPdfConverter;
 import com.resumeflow.resume.generator.GeneratedArtifact;
 import com.resumeflow.resume.generator.ResumeGenerator;
 import com.resumeflow.resume.parser.DocumentType;
 import com.resumeflow.resume.parser.ResumeContentModel;
 import com.resumeflow.resume.parser.TemplateMetadata;
+import com.resumeflow.resume.processor.DocumentProcessorClient;
+import com.resumeflow.resume.processor.PdfPatchResult;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
@@ -24,11 +27,15 @@ public class ResumePatchService {
 
   private final List<ResumeGenerator> generators;
   private final DocxToPdfConverter pdfConverter;
+  private final DocumentProcessorClient processorClient;
 
   public ResumePatchService(
-      List<ResumeGenerator> generators, DocxToPdfConverter pdfConverter) {
+      List<ResumeGenerator> generators,
+      DocxToPdfConverter pdfConverter,
+      DocumentProcessorClient processorClient) {
     this.generators = generators;
     this.pdfConverter = pdfConverter;
+    this.processorClient = processorClient;
   }
 
   /**
@@ -42,6 +49,29 @@ public class ResumePatchService {
       TemplateMetadata template,
       Path outputFile) {
     return generatorFor(type).generate(originalFile, content, template, outputFile);
+  }
+
+  /**
+   * Surgically patches a PDF: only changed lines are rewritten in place via
+   * the document processor. Returns the patched bytes plus explicit warnings
+   * for edits that could not be applied without redesigning the layout.
+   */
+  public PdfPatchResult patchPdf(
+      Path originalFile,
+      tools.jackson.databind.JsonNode oldContent,
+      tools.jackson.databind.JsonNode newContent,
+      Path outputFile) {
+    String filename = originalFile.getFileName() == null
+        ? "resume.pdf"
+        : originalFile.getFileName().toString();
+    PdfPatchResult result =
+        processorClient.patchPdf(originalFile, filename, oldContent, newContent);
+    try {
+      java.nio.file.Files.write(outputFile, result.pdf());
+    } catch (java.io.IOException e) {
+      throw new ResumeParseException("Cannot write patched PDF", e);
+    }
+    return result;
   }
 
   /**

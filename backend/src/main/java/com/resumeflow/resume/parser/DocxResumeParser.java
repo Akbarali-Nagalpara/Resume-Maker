@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFRun;
@@ -88,13 +89,14 @@ public class DocxResumeParser implements ResumeParser {
     List<ParsedResume.SectionIndexEntry> index = new ArrayList<>();
     List<TemplateMetadata.SectionAnchor> anchors = new ArrayList<>();
     ObjectNode mappings = objectMapper.createObjectNode();
+    Map<String, Integer> keyCounts = new LinkedHashMap<>();
     int position = 0;
     for (int i = firstHeading; i < blocks.size(); i++) {
       Block block = blocks.get(i);
       if (!block.heading()) {
         continue;
       }
-      String key = SectionClassifier.classifyHeading(block.title()).orElseGet(
+      String base = SectionClassifier.classifyHeading(block.title()).orElseGet(
           () -> "custom-" + block.title().toLowerCase().replaceAll("[^a-z0-9]+", "-"));
       List<String> lines = new ArrayList<>(block.lines());
       List<String> nodeIds = new ArrayList<>(block.nodeIds());
@@ -106,6 +108,33 @@ public class DocxResumeParser implements ResumeParser {
         nodeIds.addAll(blocks.get(j).nodeIds());
         contentNodeIds.addAll(blocks.get(j).nodeIds());
       }
+      if (isSkillsLabel(block.title()) && "skills".equals(lastSectionKey(sections))) {
+        // Skill subcategory label ("Languages:", "Frontend:") stays inside
+        // the skills section so values are never orphaned into splinters.
+        SectionBody skillsBody = sections.get("skills");
+        skillsBody.lines().add(block.title());
+        skillsBody.lines().addAll(lines);
+        skillsBody.nodeIds().add(block.nodeIds().get(0));
+        skillsBody.nodeIds().addAll(contentNodeIds);
+        mappings.put("skills", String.join(",", skillsBody.nodeIds()));
+        continue;
+      }
+      if (sections.containsKey(base) && KNOWN_SECTION_KEYS.contains(base)) {
+        // A repeated known section (e.g. two "Experience" blocks) merges into
+        // the first: all content is preserved under one deterministic key.
+        SectionBody existing = sections.get(base);
+        existing.lines().addAll(lines);
+        existing.nodeIds().addAll(contentNodeIds);
+        mappings.put(base, String.join(",", existing.nodeIds()));
+        continue;
+      }
+      int count = keyCounts.merge(base, 1, Integer::sum);
+      String key = count == 1 ? base : base + "-" + count;
+      while (sections.containsKey(key)) {
+        count++;
+        key = base + "-" + count;
+      }
+      keyCounts.put(base, count);
       sections.put(key, new SectionBody(lines, contentNodeIds));
       titles.put(key, block.title());
       index.add(new ParsedResume.SectionIndexEntry(key, block.title(), position));
@@ -121,6 +150,22 @@ public class DocxResumeParser implements ResumeParser {
         sourceChecksum);    return new ParsedResume(DocumentType.DOCX, content, template, index);
   }
 
+  private static boolean isSkillsLabel(String title) {
+    if (title == null || !title.endsWith(":") || title.length() >= 30) {
+      return false;
+    }
+    Optional<String> key = SectionClassifier.classifyHeading(title);
+    return key.isEmpty() || key.get().equals("skills") || key.get().equals("languages");
+  }
+
+  private static String lastSectionKey(Map<String, SectionBody> sections) {
+    String last = null;
+    for (String key : sections.keySet()) {
+      last = key;
+    }
+    return last;
+  }
+
   private PersonalInfo parsePersonal(List<String> lines) {
     String name = lines.isEmpty() ? "Unnamed" : lines.get(0);
     String title = null;
@@ -128,31 +173,38 @@ public class DocxResumeParser implements ResumeParser {
     String phone = null;
     String location = null;
     String website = null;
+    String github = null;
+    String linkedin = null;
     for (int i = 1; i < lines.size(); i++) {
       String line = lines.get(i);
-      if (line.contains("@") || SectionClassifier.parseContactLine(line).phone() != null) {
-        SectionClassifier.ContactParts parts = SectionClassifier.parseContactLine(line);
+      SectionClassifier.ContactParts parts = SectionClassifier.parseContactLine(line);
+      if (line.contains("@") || parts.phone() != null || parts.github() != null
+          || parts.linkedin() != null || parts.website() != null) {
         if (parts.email() != null) {
           email = parts.email();
         }
         if (parts.phone() != null) {
           phone = parts.phone();
         }
+        if (parts.github() != null) {
+          github = parts.github();
+        }
+        if (parts.linkedin() != null) {
+          linkedin = parts.linkedin();
+        }
         if (parts.website() != null) {
           website = parts.website();
         }
         if (parts.location() != null) {
-          location = parts.location();
+          location = location == null ? parts.location() : location + ", " + parts.location();
         }
       } else if (title == null) {
         title = line;
-      } else if (website == null && line.matches("(?i).*(\\.com|\\.dev|\\.io|\\.me|http).*")) {
-        website = line;
       } else if (location == null) {
         location = line;
       }
     }
-    return new PersonalInfo(name, title, email, phone, location, website);
+    return new PersonalInfo(name, title, email, phone, location, website, github, linkedin);
   }
 
   private ResumeContentModel buildContent(
@@ -164,7 +216,19 @@ public class DocxResumeParser implements ResumeParser {
     List<String> skills = new ArrayList<>();
     SectionBody skillsBody = sections.getOrDefault("skills", new SectionBody(List.of(), List.of()));
     for (String line : skillsBody.lines()) {
-      skills.addAll(SectionClassifier.splitSkills(line));
+      String stripped = line.strip();
+      // Subcategory labels stay verbatim; value lines split on separators.
+      if (stripped.endsWith(":") && stripped.length() < 30) {
+        if (!skills.contains(stripped)) {
+          skills.add(stripped);
+        }
+      } else {
+        for (String skill : SectionClassifier.splitSkills(line)) {
+          if (!skills.contains(skill)) {
+            skills.add(skill);
+          }
+        }
+      }
     }
     List<ExperienceItem> experience = parseExperience(
         sections.getOrDefault("experience", new SectionBody(List.of(), List.of())), mappings);
@@ -180,8 +244,44 @@ public class DocxResumeParser implements ResumeParser {
       }
     });
     mappings.put("personal.name", "p0");
-    return new ResumeContentModel(personal, String.join("\n", summary.lines()),
+    ResumeContentModel content = new ResumeContentModel(personal,
+        String.join("\n", summary.lines()),
         skills.stream().distinct().toList(), experience, projects, education, additional);
+    return sanitize(content);
+  }
+
+  /**
+   * Incorrect data is worse than missing data: clears fields holding
+   * obviously unrelated content. Semantic misassignment is fixed at the
+   * section-assignment layer, not here.
+   */
+  static ResumeContentModel sanitize(ResumeContentModel content) {
+    PersonalInfo personal = content.personal();
+    String github = personal.github() != null
+        && personal.github().toLowerCase().contains("github.com") ? personal.github() : null;
+    String linkedin = personal.linkedin() != null
+        && personal.linkedin().toLowerCase().contains("linkedin.com") ? personal.linkedin() : null;
+    String website = personal.website() != null
+        && SectionClassifier.looksLikeUrl(personal.website()) ? personal.website() : null;
+    String location = SectionClassifier.normalizeLocation(personal.location());
+    PersonalInfo cleanPersonal = new PersonalInfo(personal.name(), personal.title(),
+        personal.email(), personal.phone(), location, website, github, linkedin);
+    List<EducationItem> education = content.education().stream()
+        .map(item -> new EducationItem(item.id(),
+            looksLikeUrlOrContact(item.degree()) ? "" : item.degree(),
+            looksLikeUrlOrContact(item.school()) ? null : item.school(),
+            item.dates()))
+        .toList();
+    return new ResumeContentModel(cleanPersonal, content.summary(),
+        content.skills().stream().filter(skill -> !skill.isBlank()).toList(),
+        content.experience(), content.projects(), education, content.additionalSections());
+  }
+
+  private static boolean looksLikeUrlOrContact(String value) {
+    if (value == null || value.isBlank()) {
+      return false;
+    }
+    return SectionClassifier.looksLikeUrl(value) || value.contains("@");
   }
 
   /**
@@ -189,7 +289,7 @@ public class DocxResumeParser implements ResumeParser {
    * generator rewrites items in place. Lines and node ids are
    * paragraph-aligned.
    */
-  private List<ExperienceItem> parseExperience(SectionBody body, ObjectNode mappings) {
+  static List<ExperienceItem> parseExperience(SectionBody body, ObjectNode mappings) {
     List<Integer> kept = new ArrayList<>();
     for (int i = 0; i < body.lines().size(); i++) {
       if (!body.lines().get(i).isBlank()) {
@@ -236,35 +336,52 @@ public class DocxResumeParser implements ResumeParser {
     return groups;
   }
 
-  private ExperienceItem toExperience(List<String> group, int counter) {
+  static ExperienceItem toExperience(List<String> group, int counter) {
     String heading = group.get(0);
     String role = heading;
     String company = null;
-    String[] split = heading.split("\\s+@\\s+|\\s+[—–-]\\s+|\\s*,\\s*", 2);
-    if (split.length == 2) {
+    // Only an explicit " @ " joins role and company on one line; em-dash
+    // suffixes belong to the title and must not be split off.
+    if (heading.contains(" @ ")) {
+      String[] split = heading.split("\\s+@\\s+", 2);
       role = split[0].trim();
       company = split[1].trim();
     }
     String dates = null;
+    String location = null;
     List<String> bullets = new ArrayList<>();
     for (int i = 1; i < group.size(); i++) {
-      String line = group.get(i);
+      String line = group.get(i).trim();
+      if (line.isEmpty()) {
+        continue;
+      }
       if (dates == null && SectionClassifier.containsDateRange(line) && line.length() < 60) {
         dates = line;
       } else if (SectionClassifier.isBullet(line)) {
         bullets.add(SectionClassifier.stripBullet(line));
-      } else if (!line.isBlank()) {
+      } else if (SectionClassifier.isContactLine(line)) {
+        continue;
+      } else if ((line.contains("•") || line.contains("|") || line.contains("·"))
+          && company == null) {
+        String[] parts = SectionClassifier.splitCompanyLocation(line);
+        company = parts[0];
+        location = parts[1];
+      } else if (company == null) {
+        company = line;
+      } else if (location == null && line.contains(",") && line.length() < 50) {
+        location = line;
+      } else {
         bullets.add(line);
       }
     }
-    if (company != null && company.matches("(?i).*((19|20)\\d{2}|present).*")) {
+    if (company != null && SectionClassifier.containsDateRange(company)) {
       dates = company;
       company = null;
     }
-    return new ExperienceItem("exp-" + (counter + 1), role, company, null, dates, bullets);
+    return new ExperienceItem("exp-" + (counter + 1), role, company, location, dates, bullets);
   }
 
-  private List<ProjectItem> parseProjects(SectionBody body, ObjectNode mappings) {
+  static List<ProjectItem> parseProjects(SectionBody body, ObjectNode mappings) {
     List<ProjectItem> items = new ArrayList<>();
     int counter = 0;
     for (List<Integer> group : groupBlockIndexes(body.lines())) {
@@ -273,55 +390,190 @@ public class DocxResumeParser implements ResumeParser {
         continue;
       }
       String name = groupLines.get(0);
-      String stack = null;
+      List<String> rest = groupLines.subList(1, groupLines.size());
+      String stack = splitProjectStack(rest);
       List<String> description = new ArrayList<>();
-      for (int i = 1; i < groupLines.size(); i++) {
-        String line = SectionClassifier.isBullet(groupLines.get(i))
-            ? SectionClassifier.stripBullet(groupLines.get(i))
-            : groupLines.get(i);
-        if (i == groupLines.size() - 1 && line.matches("(?i).*[·|/,].*") && line.length() < 120) {
-          stack = line;
-        } else {
-          description.add(line);
+      java.util.Set<Integer> stackIndexes = stackIndexes(rest);
+      for (int i = 0; i < rest.size(); i++) {
+        if (stackIndexes.contains(i)) {
+          continue;
         }
+        String line = rest.get(i);
+        description.add(SectionClassifier.isBullet(line)
+            ? SectionClassifier.stripBullet(line)
+            : line);
       }
       mappings.put("projects[" + counter + "]",
           String.join(",", group.stream().map(body.nodeIds()::get).toList()));
       items.add(new ProjectItem("project-" + (++counter), name,
-          String.join(" ", description), stack));
-    }
-    return items;
-  }
-
-  private List<EducationItem> parseEducation(SectionBody body, ObjectNode mappings) {
-    List<EducationItem> items = new ArrayList<>();
-    int counter = 0;
-    for (List<Integer> group : groupBlockIndexes(body.lines())) {
-      List<String> groupLines = group.stream().map(body.lines()::get).toList();
-      if (groupLines.isEmpty()) {
-        continue;
-      }
-      mappings.put("education[" + counter + "]",
-          String.join(",", group.stream().map(body.nodeIds()::get).toList()));
-      items.add(new EducationItem("education-" + (++counter), groupLines.get(0),
-          groupLines.size() > 1 ? groupLines.get(1) : null,
-          groupLines.size() > 2 ? groupLines.get(groupLines.size() - 1) : null));
+          description.isEmpty() ? null : String.join(" ", description), stack));
     }
     return items;
   }
 
   /**
-   * Splits section lines back into blank-line separated groups. The splitter
-   * dropped blank lines, so groups are recovered from bullet runs: a
-   * non-bullet line following bullets starts a new group.
+   * Stack = first run of 3+ stack-token lines anywhere after the name (chip
+   * layouts), else the legacy trailing separator line.
    */
-  private static List<List<Integer>> groupBlockIndexes(List<String> lines) {
+  static String splitProjectStack(List<String> rest) {
+    List<Integer> run = new ArrayList<>();
+    for (int i = 0; i < rest.size(); i++) {
+      if (SectionClassifier.isStackToken(rest.get(i))) {
+        run.add(i);
+      } else {
+        if (run.size() >= 3) {
+          return joinStack(rest, run);
+        }
+        run = new ArrayList<>();
+      }
+    }
+    if (run.size() >= 3) {
+      return joinStack(rest, run);
+    }
+    if (!rest.isEmpty()) {
+      String last = rest.get(rest.size() - 1);
+      if (last.length() < 120 && last.matches("(?i).*[·|/,].*")) {
+        return last;
+      }
+    }
+    return null;
+  }
+
+  private static String joinStack(List<String> rest, List<Integer> run) {
+    StringBuilder joined = new StringBuilder();
+    for (int index : run) {
+      if (!joined.isEmpty()) {
+        joined.append(" · ");
+      }
+      joined.append(rest.get(index).trim());
+    }
+    return joined.toString();
+  }
+
+  private static java.util.Set<Integer> stackIndexes(List<String> rest) {
+    List<Integer> run = new ArrayList<>();
+    for (int i = 0; i < rest.size(); i++) {
+      if (SectionClassifier.isStackToken(rest.get(i))) {
+        run.add(i);
+      } else {
+        if (run.size() >= 3) {
+          return new java.util.HashSet<>(run);
+        }
+        run = new ArrayList<>();
+      }
+    }
+    if (run.size() >= 3) {
+      return new java.util.HashSet<>(run);
+    }
+    if (!rest.isEmpty()) {
+      String last = rest.get(rest.size() - 1);
+      if (last.length() < 120 && last.matches("(?i).*[·|/,].*")) {
+        return java.util.Set.of(rest.size() - 1);
+      }
+    }
+    return java.util.Set.of();
+  }
+
+  static List<EducationItem> parseEducation(SectionBody body, ObjectNode mappings) {
+    List<EducationItem> items = new ArrayList<>();
+    int counter = 0;
+    for (List<Integer> group : groupEducationIndexes(body.lines())) {
+      List<String> groupLines = group.stream().map(body.lines()::get).toList();
+      if (groupLines.isEmpty()) {
+        continue;
+      }
+      String degree = groupLines.get(0);
+      String school = null;
+      String dates = null;
+      for (int i = 1; i < groupLines.size(); i++) {
+        String line = groupLines.get(i);
+        if (SectionClassifier.containsDateRange(line)) {
+          dates = line;
+        } else if (school == null) {
+          school = line;
+        }
+      }
+      mappings.put("education[" + counter + "]",
+          String.join(",", group.stream().map(body.nodeIds()::get).toList()));
+      items.add(new EducationItem("education-" + (++counter), degree, school, dates));
+    }
+    return items;
+  }
+
+  /**
+   * One education item per degree: recorded paragraph breaks split
+   * deterministically, otherwise a new item starts after a dates line when
+   * more content follows (degrees are date-terminated blocks).
+   */
+  static List<List<Integer>> groupEducationIndexes(List<String> lines) {
+    boolean hasBreaks = lines.stream().anyMatch(String::isBlank);
+    if (hasBreaks) {
+      return splitOnBlanks(lines);
+    }
+    List<List<Integer>> groups = new ArrayList<>();
+    List<Integer> current = new ArrayList<>();
+    for (int i = 0; i < lines.size(); i++) {
+      String line = lines.get(i);
+      if (line.isBlank()) {
+        continue;
+      }
+      if (!current.isEmpty()
+          && SectionClassifier.containsDateRange(lines.get(current.get(current.size() - 1)))) {
+        groups.add(current);
+        current = new ArrayList<>();
+      }
+      current.add(i);
+    }
+    if (!current.isEmpty()) {
+      groups.add(current);
+    }
+    return groups;
+  }
+
+  static List<List<Integer>> splitOnBlanks(List<String> lines) {
+    List<List<Integer>> groups = new ArrayList<>();
+    List<Integer> current = new ArrayList<>();
+    for (int i = 0; i < lines.size(); i++) {
+      if (lines.get(i).isBlank()) {
+        if (!current.isEmpty()) {
+          groups.add(current);
+          current = new ArrayList<>();
+        }
+        continue;
+      }
+      current.add(i);
+    }
+    if (!current.isEmpty()) {
+      groups.add(current);
+    }
+    return groups;
+  }
+
+  /**
+   * Splits section lines into item groups. Recorded paragraph breaks split
+   * deterministically; otherwise a new item starts only at a title-like line
+   * (short, uppercase start, no trailing period) following bullets, so
+   * description fragments never split items.
+   */
+  static List<List<Integer>> groupBlockIndexes(List<String> lines) {
+    if (lines.stream().anyMatch(String::isBlank)) {
+      return splitOnBlanks(lines);
+    }
     List<List<Integer>> groups = new ArrayList<>();
     List<Integer> current = new ArrayList<>();
     boolean seenBullet = false;
     for (int i = 0; i < lines.size(); i++) {
-      boolean bullet = SectionClassifier.isBullet(lines.get(i));
-      if (!bullet && seenBullet && !current.isEmpty()) {
+      String line = lines.get(i);
+      boolean bullet = SectionClassifier.isBullet(line);
+      String stripped = line.strip();
+      boolean startsItem = !bullet && seenBullet && !current.isEmpty()
+          && stripped.length() < 80
+          && !stripped.endsWith(".") && !stripped.endsWith(",")
+          && !stripped.endsWith(";") && !stripped.endsWith(":")
+          && !stripped.isEmpty() && Character.isUpperCase(stripped.charAt(0))
+          && !SectionClassifier.continues(current.isEmpty() ? null
+              : lines.get(current.get(current.size() - 1)));
+      if (startsItem) {
         groups.add(current);
         current = new ArrayList<>();
         seenBullet = false;
@@ -454,14 +706,10 @@ public class DocxResumeParser implements ResumeParser {
         continue;
       }
       boolean styled = isHeadingStyle(view);
-      // A keyword only marks a heading on short, title-shaped lines, so body
-      // sentences mentioning e.g. "experience" never become sections. ALL-CAPS
-      // titles additionally wait for the first real section (contact blocks
-      // stay in the preamble).
-      boolean keyword =
-          SectionClassifier.classifyHeading(view.text()).isPresent();
-      boolean shaped = SectionClassifier.looksLikeHeading(view.text());
-      boolean heading = styled || (shaped && (keyword || seenKnownSection));
+      // Authoritative heading test: bullets are never headings; unstyled
+      // keyword lines must be short and title-shaped.
+      boolean heading = SectionClassifier.isSectionHeading(
+          view.text(), styled, seenKnownSection);
       if (heading && (seenAnyContent || title != null || !lines.isEmpty())) {
         if (title != null || !lines.isEmpty()) {
           blocks.add(new Block(title, List.copyOf(lines), List.copyOf(nodeIds), headingBlock));
@@ -472,9 +720,7 @@ public class DocxResumeParser implements ResumeParser {
         nodeIds.add(view.id());
         headingBlock = true;
         seenAnyContent = true;
-        if (styled || keyword) {
-          seenKnownSection = true;
-        }
+        seenKnownSection = true;
       } else {
         lines.add(view.text());
         nodeIds.add(view.id());
@@ -550,6 +796,11 @@ public class DocxResumeParser implements ResumeParser {
   private record Block(String title, List<String> lines, List<String> nodeIds, boolean heading) {
   }
 
-  private record SectionBody(List<String> lines, List<String> nodeIds) {
+  /** Shared section body CARRIER also used by the PDF fallback parser. */
+  record SectionBody(List<String> lines, List<String> nodeIds) {
   }
+
+  /** Section keys with fixed model fields; repeats merge instead of colliding. */
+  private static final java.util.Set<String> KNOWN_SECTION_KEYS =
+      java.util.Set.of("summary", "skills", "experience", "projects", "education");
 }

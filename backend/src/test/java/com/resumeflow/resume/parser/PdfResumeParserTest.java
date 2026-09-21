@@ -31,4 +31,18 @@ class PdfResumeParserTest {
     assertTrue(parsed.template().properties().has("fonts"));
     assertTrue(parsed.template().properties().has("blocks"));
   }
+
+  @Test
+  void detectsTwoColumnsAndMultiplePages(@TempDir Path directory) throws Exception {
+    Path file = SampleResumes.pdfSample(directory, "two-col.pdf", true, true);
+
+    ParsedResume parsed = parser.parse(file, "checksum-pdf");
+
+    assertEquals(2, parsed.template().properties().get("columns").asInt());
+    assertEquals(2, parsed.template().properties().get("pageCount").asInt());
+    // Right-column content is assigned to its section, not dropped.
+    assertTrue(parsed.content().additionalSections().stream()
+        .anyMatch(section -> section.key().equals("languages")));
+    assertEquals("Maya Chen", parsed.content().personal().name());
+  }
 }

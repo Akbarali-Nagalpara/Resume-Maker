@@ -102,6 +102,8 @@ public class ResumeUploadService {
       try {
         Files.write(tempFile, bytes);
         ParsedResume parsed = parserService.parse(tempFile, type, checksum);
+        log.info("Resume {} parsed (type={}, sections={})", resumeId, type,
+            parsed.sections().stream().map(ParsedResume.SectionIndexEntry::key).toList());
         ResumeContent content = contentRepository.save(new ResumeContent(resume, 1,
             objectMapper.valueToTree(parsed.content())));
         ResumeTemplate template = templateRepository.save(new ResumeTemplate(resume,
@@ -113,7 +115,6 @@ public class ResumeUploadService {
         Files.deleteIfExists(tempFile);
       }
       resume.setStatus(ResumeStatus.READY);
-      log.info("Resume {} parsed (type={})", resumeId, type);
       return new UploadResponse(resumeId, ResumeStatus.READY.name(), 1);
     } catch (IOException e) {
       resume.setStatus(ResumeStatus.FAILED);

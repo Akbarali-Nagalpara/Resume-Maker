@@ -1,5 +1,6 @@
 package com.resumeflow.resume.parser;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,14 +51,29 @@ public final class SectionClassifier {
   private static final Pattern EMAIL = Pattern.compile("[\\w.+-]+@[\\w-]+\\.[\\w.]+");
   private static final Pattern PHONE =
       Pattern.compile("\\+?[\\d][\\d\\s().-]{6,}\\d");
-  private static final Pattern URL =
-      Pattern.compile("(https?://[\\w./-]+|[\\w-]+\\.[a-z]{2,}(?:/[\\w./-]*)?)",
+  private static final String TLDS =
+      "com|org|net|io|dev|me|in|co|ai|app|tech|info|us|uk|edu|online|site";
+  // Bare domains count only with a real TLD in standalone/delimited position
+  // ("React.js", "B.Tech", "Node.js" must NOT match).
+  private static final Pattern URL = Pattern.compile(
+      "(https?://[\\w./-]+|[\\w-]+\\.(?:" + TLDS + ")(?:/[\\w./-]*)?(?=$|\\s*[|•/,;:]))",
+      Pattern.CASE_INSENSITIVE);
+  private static final Pattern GITHUB =
+      Pattern.compile("(?:https?://)?(?:www\\.)?github\\.com/[\\w.-]+/?",
           Pattern.CASE_INSENSITIVE);
-  private static final Pattern DATE_RANGE =
-      Pattern.compile("(19|20)\\d{2}\\s*[—–\\-to]+\\s*((19|20)\\d{2}|present|current)",
-          Pattern.CASE_INSENSITIVE);
+  private static final Pattern LINKEDIN = Pattern.compile(
+      "(?:https?://)?(?:www\\.)?linkedin\\.com/in/[\\w.-]+/?", Pattern.CASE_INSENSITIVE);
+  private static final String MONTHS =
+      "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*";
+  private static final Pattern DATE_RANGE = Pattern.compile(
+      "(?:\\b" + MONTHS + "\\s+)?(19|20)\\d{2}\\s*[—–\\-to]+\\s*(?:\\b" + MONTHS
+          + "\\s+)?((19|20)\\d{2}|present|current)",
+      Pattern.CASE_INSENSITIVE);
   private static final Pattern BULLET_PREFIX =
-      Pattern.compile("^[•\\-\\*o▪‣]\\s+|^\\d+[.)]\\s+");
+      Pattern.compile("^(?:[•▪‣▶▸→⇒]\\s*|[-*o]\\s+|\\d+[.)]\\s+)");
+  private static final java.util.Set<String> CONTINUATIONS = java.util.Set.of(
+      ",", "-", "/", ":", "with", "and", "or", "the", "a", "an", "of", "to",
+      "for", "in", "on", "by", "via", "as", "at", "from", "into", "using");
 
   private SectionClassifier() {
   }
@@ -94,6 +110,42 @@ public final class SectionClassifier {
     return (double) upper / letters > 0.7;
   }
 
+  /**
+   * Authoritative heading test for block splitters. Bullet lines are never
+   * headings. Unstyled keyword lines must be short and title-shaped; ALL-CAPS
+   * titles additionally wait for the first real section so contact blocks
+   * stay in the preamble.
+   */
+  public static boolean isSectionHeading(String line, boolean styled, boolean seenKnownSection) {
+    String text = line == null ? "" : line.trim();
+    if (text.isEmpty() || isBullet(text)) {
+      return false;
+    }
+    if (styled) {
+      return true;
+    }
+    if (text.length() > 60 || text.endsWith(".") || text.endsWith(",")) {
+      return false;
+    }
+    // Date/GPA lines belong to items, never start sections.
+    if (containsDateRange(text)) {
+      return false;
+    }
+    boolean keyword = classifyHeading(text).isPresent();
+    if (keyword && text.length() <= 32) {
+      return true;
+    }
+    if (!seenKnownSection) {
+      return false;
+    }
+    long letters = text.chars().filter(Character::isLetter).count();
+    if (letters < 3) {
+      return false;
+    }
+    long upper = text.chars().filter(Character::isUpperCase).count();
+    return (double) upper / letters > 0.7;
+  }
+
   public static boolean isBullet(String line) {
     return line != null && BULLET_PREFIX.matcher(line.trim()).find();
   }
@@ -107,21 +159,143 @@ public final class SectionClassifier {
     return line != null && DATE_RANGE.matcher(line).find();
   }
 
-  /** Extracts e-mail / phone / website fragments from a contact line. */
+  /** Whether a value looks like a URL (website field validation). */
+  public static boolean looksLikeUrl(String value) {
+    return value != null && URL.matcher(value).find();
+  }
+
+  /** Extracts e-mail / phone / github / linkedin / website / location fragments. */
   public static ContactParts parseContactLine(String line) {
     String rest = line == null ? "" : line;
     String email = findAndRemove(EMAIL, rest);
     rest = removeFirst(EMAIL, rest);
     String phone = findAndRemove(PHONE, rest);
     rest = removeFirst(PHONE, rest);
+    String github = findAndRemove(GITHUB, rest);
+    rest = removeFirst(GITHUB, rest);
+    String linkedin = findAndRemove(LINKEDIN, rest);
+    rest = removeFirst(LINKEDIN, rest);
     String website = findAndRemove(URL, rest);
     rest = removeFirst(URL, rest);
-    String location = String.join(" ", rest.split("[|·•,;]")).trim()
-        .replaceAll("\\s{2,}", " ");
-    return new ContactParts(email, phone, website, location.isBlank() ? null : location);
+    return new ContactParts(email, phone, website, github, linkedin,
+        normalizeLocation(rest));
   }
 
-  public record ContactParts(String email, String phone, String website, String location) {
+  public record ContactParts(
+      String email, String phone, String website, String github, String linkedin,
+      String location) {
+  }
+
+  /**
+   * Rebuilds a location from leftover fragments, dropping URL/e-mail/phone
+   * parts. Never returns contact data as a location.
+   */
+  public static String normalizeLocation(String rest) {
+    if (rest == null) {
+      return null;
+    }
+    List<String> fragments = new ArrayList<>();
+    for (String chunk : rest.split("[|·•,;]")) {
+      String part = chunk.trim();
+      if (part.isEmpty()) {
+        continue;
+      }
+      if (URL.matcher(part).find() || EMAIL.matcher(part).find()
+          || PHONE.matcher(part).find() || part.contains("@")) {
+        continue;
+      }
+      fragments.add(part);
+    }
+    if (fragments.isEmpty()) {
+      return null;
+    }
+    String location = String.join(", ", fragments).replaceAll("\\s{2,}", " ").strip();
+    if (location.contains(",")) {
+      return location;
+    }
+    String[] words = location.split("\\s+");
+    if (words.length == 2 && words[0].length() > 0 && words[1].length() > 0
+        && Character.isUpperCase(words[0].charAt(0)) && words[0].substring(1).equals(
+            words[0].substring(1).toLowerCase())
+        && Character.isUpperCase(words[1].charAt(0)) && words[1].substring(1).equals(
+            words[1].substring(1).toLowerCase())) {
+      return words[0] + ", " + words[1];
+    }
+    return location;
+  }
+
+  public static boolean isContactLine(String line) {
+    if (line == null) {
+      return false;
+    }
+    ContactParts parts = parseContactLine(line);
+    return line.contains("@") || parts.phone() != null || parts.github() != null
+        || parts.linkedin() != null || parts.website() != null;
+  }
+
+  /** Splits "Company • City, Country" style headers into company + location. */
+  public static String[] splitCompanyLocation(String line) {
+    for (String sep : new String[] {"•", "|", "·"}) {
+      if (line.contains(sep)) {
+        String[] parts = java.util.Arrays.stream(line.split(java.util.regex.Pattern.quote(sep)))
+            .map(String::trim)
+            .filter(part -> !part.isEmpty())
+            .toArray(String[]::new);
+        if (parts.length >= 2) {
+          return new String[] {parts[0], String.join(", ", java.util.Arrays.copyOfRange(parts, 1, parts.length))};
+        }
+        if (parts.length == 1) {
+          return new String[] {parts[0], null};
+        }
+      }
+    }
+    String trimmed = line.trim();
+    return new String[] {trimmed.isEmpty() ? null : trimmed, null};
+  }
+
+  /** Whether a line looks like a stack chip (short tech token). */
+  public static boolean isStackToken(String line) {
+    String token = line == null ? "" : line.strip();
+    if (token.isEmpty() || token.length() >= 40) {
+      return false;
+    }
+    if (token.chars().allMatch(c -> Character.isUpperCase(c) || !Character.isLetter(c))
+        && token.chars().anyMatch(Character::isLetter)) {
+      return true;
+    }
+    if (token.chars().anyMatch(Character::isDigit)) {
+      return true;
+    }
+    if (token.matches("^[\\w+-]+(\\.[\\w+-]+)+$")) {
+      return true;
+    }
+    String[] words = token.split("\\s+");
+    if (words.length == 1) {
+      return true;
+    }
+    return words.length <= 3
+        && java.util.Arrays.stream(words)
+            .allMatch(word -> !word.isEmpty()
+                && (Character.isUpperCase(word.charAt(0)) || word.chars().anyMatch(Character::isDigit)));
+  }
+
+  /** Whether a line likely continues on the next line (ends with a
+   * preposition, conjunction or fragment punctuation). */
+  public static boolean continues(String previous) {
+    if (previous == null) {
+      return false;
+    }
+    String text = previous.strip();
+    if (text.endsWith(",") || text.endsWith("-") || text.endsWith("/")
+        || text.endsWith(":")) {
+      return true;
+    }
+    String[] words = text.split("\\s+");
+    if (words.length == 0) {
+      return false;
+    }
+    String last = words[words.length - 1].replaceAll("[•·,;:()\"']", "").toLowerCase();
+    return CONTINUATIONS.contains(last);
   }
 
   private static String find(Pattern pattern, String line) {

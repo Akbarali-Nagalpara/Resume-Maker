@@ -37,6 +37,8 @@ export function ResumePreview({ resume, zoom }: ResumePreviewProps) {
         <p className="mt-4 text-[11px]">
           {resume.personal.email} · {resume.personal.phone} · {resume.personal.location} ·{" "}
           {resume.personal.website}
+          {resume.personal.github ? ` · ${resume.personal.github}` : ""}
+          {resume.personal.linkedin ? ` · ${resume.personal.linkedin}` : ""}
         </p>
       </header>
       <PreviewSection title="Profile">

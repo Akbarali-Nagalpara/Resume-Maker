@@ -3,6 +3,7 @@ package com.resumeflow.resume.controller;
 import com.resumeflow.resume.dto.ContentResponse;
 import com.resumeflow.resume.dto.EditorStateResponse;
 import com.resumeflow.resume.dto.GenerateResponse;
+import com.resumeflow.resume.dto.PageCountResponse;
 import com.resumeflow.resume.dto.PreviewResponse;
 import com.resumeflow.resume.dto.UpdateContentRequest;
 import com.resumeflow.resume.dto.UploadResponse;
@@ -58,6 +59,18 @@ public class ResumeController {
   @GetMapping("/{id}/preview")
   public PreviewResponse preview(@PathVariable UUID id) {
     return resumeService.preview(id);
+  }
+
+  @GetMapping("/{id}/preview/page-count")
+  public PageCountResponse previewPageCount(@PathVariable UUID id) {
+    return resumeService.previewPageCount(id);
+  }
+
+  @GetMapping("/{id}/preview/pages/{page}")
+  public ResponseEntity<byte[]> previewPage(@PathVariable UUID id, @PathVariable int page) {
+    return ResponseEntity.ok()
+        .contentType(MediaType.IMAGE_PNG)
+        .body(resumeService.previewPage(id, page));
   }
 
   @PutMapping("/{id}/content")

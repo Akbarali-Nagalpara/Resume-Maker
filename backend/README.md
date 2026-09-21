@@ -43,6 +43,9 @@ SERVER_PORT=8081 mvn spring-boot:run
 ```
 
 Production build: `mvn verify` (unit + Testcontainers integration tests, then jar).
+Golden PDF tests (`GoldenPdfIT`) additionally require the document
+processor running on the host at `:8001`, since the test JVM calls it over
+plain localhost (only PostgreSQL/Redis run in containers).
 
 ```sh
 export DB_PASSWORD=...
@@ -113,10 +116,29 @@ No screen changes are required; the wire shape already matches the mock.
   nodes are editable (personal name, summary, skills, experience, projects,
   education). Tables, text boxes, footnotes and embedded objects are carried
   over byte-identical but not content-editable.
-- PDF generation re-renders content with captured page geometry/fonts/sizes;
-  complex multi-column or heavily designed PDFs are not pixel-identical.
+- PDF generation patches changed fields in the original file (redact +
+  insert at the original baseline with the original size/color). A patch
+  applies only when the replacement fits (compared against both the element
+  width and the original advance) and the font maps to Base-14 or a
+  metric-compatible twin (Nimbus/Liberation families; symbol bullets restyled
+  to •); otherwise an explicit warning is returned and the original is kept.
+  Added lines/items have no original element and are reported, not placed.
+  No-edit generations return the original bytes untouched.
+- Patched text keeps its visual position, but PDF text-extraction order may
+  place inserted text later in the stream (cosmetic for selection/search
+  order, not for rendering).
 - Personal header fields beyond name (title, contact lines) are extracted but
   not yet mapped back into DOCX generation (title/contact paragraphs have no
-  stable node mapping); they round-trip unchanged.
+  stable node mapping); they round-trip unchanged. In PDFs, contact edits
+  outside the name produce an explicit `contact-preserved` warning.
+- `location` subfields are stored and previewed but not rendered into
+  generated files.
+- Unstyled section-heading detection is heuristic (short title-shaped lines,
+  bullets never headings, date lines never headings); unusual body lines
+  starting with section keywords may need explicit Heading styles in DOCX
+  for perfect classification. Hyphen-wrapped fragments stay split across
+  lines (truthful and patchable, cosmetic in the editor).
+  unusual body lines starting with section keywords may need explicit Heading
+  styles in DOCX for perfect classification.
 - Parsing is synchronous in the request thread; large files should move to an
   async job model (endpoint shape already supports polling via versions).

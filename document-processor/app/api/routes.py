@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.parsers import docx_parser, pdf_parser
+from app.services import pdf_patch
 from app.utils import detect
 
 router = APIRouter()
@@ -43,6 +44,38 @@ async def process_pdf(file: UploadFile = File(...)) -> dict:
     result = pdf_parser.to_dict(processed)
     result["sourceChecksum"] = hashlib.sha256(data).hexdigest()
     return result
+
+
+@router.post("/internal/patch/pdf")
+async def patch_pdf_endpoint(
+    file: UploadFile = File(...),
+    oldContent: str = Form(...),
+    content: str = Form(...),
+) -> dict:
+    """Surgically patches changed lines in the original PDF.
+
+    Form fields: file (original PDF), oldContent + content (ResumeContentModel
+    JSON). Returns {pdfBase64, warnings[], patched[]}. Untouched objects are
+    preserved; impossible edits are reported, never faked.
+    """
+    import base64
+    import json
+
+    data = await file.read()
+    try:
+        old_model = json.loads(oldContent)
+        new_model = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid content JSON: {exc}") from exc
+    try:
+        pdf_bytes, warnings, patched = pdf_patch.patch_pdf(data, old_model, new_model)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"cannot patch PDF: {exc}") from exc
+    return {
+        "pdfBase64": base64.b64encode(pdf_bytes).decode("ascii"),
+        "warnings": warnings,
+        "patched": patched,
+    }
 
 
 @router.post("/internal/process/docx")

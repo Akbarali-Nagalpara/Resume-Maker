@@ -29,7 +29,8 @@ class ResumePatchServiceTest {
         public Optional<Path> convert(Path docxFile, Path outputDir) {
           return Optional.empty();
         }
-      });
+      },
+      null);
 
   @Test
   void patchesDocxContent(@TempDir Path directory) throws Exception {

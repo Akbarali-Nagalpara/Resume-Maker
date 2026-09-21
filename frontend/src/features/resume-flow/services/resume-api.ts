@@ -139,6 +139,8 @@ function normalizePersonal(raw: Record<string, unknown> | undefined): PersonalIn
     phone: text(raw?.["phone"]),
     location: text(raw?.["location"]),
     website: text(raw?.["website"]),
+    github: text(raw?.["github"]),
+    linkedin: text(raw?.["linkedin"]),
   };
 }
 
@@ -233,6 +235,25 @@ export interface GeneratedDocument {
   blob: Blob;
   mimeType: string;
   filename: string;
+  warnings: string[];
+}
+
+export function pdfPageUrl(resumeId: string, page: number): string {
+  return `${API_BASE}/api/v1/resumes/${encodeURIComponent(resumeId)}/preview/pages/${page}`;
+}
+
+export async function fetchPdfPageCount(resumeId: string): Promise<number> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `${API_BASE}/api/v1/resumes/${encodeURIComponent(resumeId)}/preview/page-count`,
+    );
+  } catch {
+    throw new ResumeApiError(0, "Network error. Could not load the preview.");
+  }
+  await throwForStatus(response);
+  const body = (await response.json()) as { pages: number };
+  return body.pages;
 }
 
 function filenameFromDisposition(header: string | null, fallback: string): string {
@@ -261,6 +282,10 @@ export async function fetchGeneratedDocument(session: ResumeSession): Promise<Ge
     throw new ResumeApiError(0, "Network error. Could not generate the resume.");
   }
   await throwForStatus(generateResponse);
+  const generated = (await generateResponse.json()) as { warnings?: unknown };
+  const warnings = Array.isArray(generated.warnings)
+    ? generated.warnings.filter((w): w is string => typeof w === "string")
+    : [];
 
   let download: Response;
   try {
@@ -276,7 +301,7 @@ export async function fetchGeneratedDocument(session: ResumeSession): Promise<Ge
     download.headers.get("Content-Disposition"),
     `${base}-updated${extension}`,
   );
-  return { blob: await download.blob(), mimeType, filename };
+  return { blob: await download.blob(), mimeType, filename, warnings };
 }
 
 export function downloadBlob(blob: Blob, filename: string): void {

@@ -60,6 +60,15 @@ public class ResumeContentService {
         .orElseThrow(() -> new IllegalStateException("No content for resume " + resumeId));
   }
 
+  /** Original extraction snapshot (version 1): the diff baseline for patching. */
+  @Transactional(readOnly = true)
+  public ResumeContent initialContent(UUID resumeId) {
+    requireReady(resumeId);
+    return contentRepository
+        .findByResumeIdAndVersionNumber(resumeId, 1)
+        .orElseThrow(() -> new IllegalStateException("No initial content for " + resumeId));
+  }
+
   @Transactional
   public ContentResponse updateContent(UUID resumeId, Long expectedVersion, JsonNode content) {
     Resume resume = requireReady(resumeId);

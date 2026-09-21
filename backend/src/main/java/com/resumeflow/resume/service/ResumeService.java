@@ -6,6 +6,7 @@ import com.resumeflow.exception.ResumeParseException;
 import com.resumeflow.resume.dto.ContentResponse;
 import com.resumeflow.resume.dto.EditorStateResponse;
 import com.resumeflow.resume.dto.GenerateResponse;
+import com.resumeflow.resume.dto.PageCountResponse;
 import com.resumeflow.resume.dto.PreviewResponse;
 import com.resumeflow.resume.dto.UploadResponse;
 import com.resumeflow.resume.dto.VersionResponse;
@@ -138,6 +139,18 @@ public class ResumeService {
               cacheService.putPreview(resumeId, response);
               return response;
             });
+  }
+
+  @Transactional(readOnly = true)
+  public PageCountResponse previewPageCount(UUID resumeId) {
+    require(resumeId);
+    return new PageCountResponse(previewService.pdfPageCount(resumeId));
+  }
+
+  @Transactional(readOnly = true)
+  public byte[] previewPage(UUID resumeId, int page) {
+    require(resumeId);
+    return previewService.pdfPageImage(resumeId, page);
   }
 
   @Transactional(readOnly = true)

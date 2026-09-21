@@ -28,6 +28,17 @@ class DocxTemplateVariantsTest {
   }
 
   @Test
+  void detectsHeadersAndFooters(@TempDir Path directory) throws Exception {
+    Path file = SampleResumes.docxSample(directory, "hf.docx", false, false, false, true);
+
+    ParsedResume parsed = parser.parse(file, "checksum");
+
+    assertTrue(parsed.template().properties().get("hasHeader").asBoolean());
+    assertTrue(parsed.template().properties().get("hasFooter").asBoolean());
+    assertEquals("Maya Chen", parsed.content().personal().name());
+  }
+
+  @Test
   void handlesMultiPageDocuments(@TempDir Path directory) throws Exception {
     Path file = SampleResumes.docxSample(directory, "multi.docx", false, true, false);
 

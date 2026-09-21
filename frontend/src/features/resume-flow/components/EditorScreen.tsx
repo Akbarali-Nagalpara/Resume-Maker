@@ -19,7 +19,9 @@ import {
   downloadBlob,
   fetchEditorState,
   fetchGeneratedDocument,
+  fetchPdfPageCount,
   isPdf,
+  pdfPageUrl,
   ResumeApiError,
   saveContent,
   type GeneratedDocument,
@@ -342,6 +344,26 @@ interface DocumentState extends GeneratedDocument {
   objectUrl: string;
 }
 
+function WarningsNotice({ warnings }: { warnings: string[] }) {
+  if (warnings.length === 0) {
+    return null;
+  }
+  return (
+    <div role="alert" className="mx-auto mb-5 max-w-xl border border-border bg-card p-4 text-left">
+      <p className="text-sm font-bold">Some edits couldn’t be applied to the original layout</p>
+      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+        {warnings.map((warning, index) => (
+          <li key={index}>{warning}</li>
+        ))}
+      </ul>
+      <p className="mt-2 text-xs text-muted-foreground">
+        The affected content is saved and shown in the live preview, but the downloaded file keeps
+        the original design for those parts.
+      </p>
+    </div>
+  );
+}
+
 export function EditorScreen({ session, onSessionChange, onBack }: EditorScreenProps) {
   const [resume, setResume] = useState<ResumeData>(session.content);
   const [saved, setSaved] = useState(true);
@@ -354,6 +376,8 @@ export function EditorScreen({ session, onSessionChange, onBack }: EditorScreenP
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [document, setDocument] = useState<DocumentState | null>(null);
+  const [docWarnings, setDocWarnings] = useState<string[]>([]);
+  const [pdfPages, setPdfPages] = useState<number | null>(null);
   const [zoom, setZoom] = useState(PREVIEW_ZOOM_DEFAULT);
 
   useEffect(() => {
@@ -363,6 +387,30 @@ export function EditorScreen({ session, onSessionChange, onBack }: EditorScreenP
       }
     };
   }, [document]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPdfPages(null);
+    if (!isPdf(session.mimeType)) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    fetchPdfPageCount(session.resumeId)
+      .then((pages) => {
+        if (!cancelled) {
+          setPdfPages(pages);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPdfPages(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.resumeId, session.mimeType]);
 
   const markDirty = (next: ResumeData) => {
     setResume(next);
@@ -384,6 +432,7 @@ export function EditorScreen({ session, onSessionChange, onBack }: EditorScreenP
         contentVersion: current.contentVersion,
         objectUrl: URL.createObjectURL(generated.blob),
       };
+      setDocWarnings(generated.warnings);
       setDocument((previous) => {
         if (previous) {
           URL.revokeObjectURL(previous.objectUrl);
@@ -475,6 +524,8 @@ export function EditorScreen({ session, onSessionChange, onBack }: EditorScreenP
 
   const busy = saving || generating || downloading;
   const showGeneratedPdf = document !== null && isPdf(document.mimeType);
+  const showOriginalPages =
+    !showGeneratedPdf && isPdf(session.mimeType) && pdfPages !== null && pdfPages > 0;
   const docStale = document !== null && document.contentVersion !== session.contentVersion;
   const statusLabel = saving
     ? "Saving…"
@@ -597,6 +648,16 @@ export function EditorScreen({ session, onSessionChange, onBack }: EditorScreenP
                   value={resume.personal.website}
                   onChange={(v) => updatePersonal("website", v)}
                 />
+                <Field
+                  label="GitHub"
+                  value={resume.personal.github}
+                  onChange={(v) => updatePersonal("github", v)}
+                />
+                <Field
+                  label="LinkedIn"
+                  value={resume.personal.linkedin}
+                  onChange={(v) => updatePersonal("linkedin", v)}
+                />
               </AccordionContent>
             </AccordionItem>
             <AccordionItem value="summary">
@@ -707,9 +768,13 @@ export function EditorScreen({ session, onSessionChange, onBack }: EditorScreenP
                   ? docStale
                     ? "Live preview · document outdated"
                     : "Generated PDF"
-                  : document
-                    ? "Live preview · DOCX ready to download"
-                    : "Live preview"}
+                  : showOriginalPages
+                    ? docStale || !saved
+                      ? "Original layout · save to refresh"
+                      : "Original layout"
+                    : document
+                      ? "Live preview · DOCX ready to download"
+                      : "Live preview"}
             </span>
           </div>
           {generateError ? (
@@ -717,6 +782,7 @@ export function EditorScreen({ session, onSessionChange, onBack }: EditorScreenP
               <SectionError message={generateError} onRetry={() => void handleSave()} />
             </div>
           ) : null}
+          <WarningsNotice warnings={docWarnings} />
           <div className="overflow-x-auto">
             {showGeneratedPdf && document ? (
               <iframe
@@ -724,6 +790,17 @@ export function EditorScreen({ session, onSessionChange, onBack }: EditorScreenP
                 src={document.objectUrl}
                 className="mx-auto min-h-[900px] w-full max-w-3xl border border-border bg-card shadow-paper"
               />
+            ) : showOriginalPages ? (
+              <div className="mx-auto grid max-w-3xl gap-5">
+                {Array.from({ length: pdfPages ?? 0 }, (_, page) => (
+                  <img
+                    key={page + 1}
+                    src={pdfPageUrl(session.resumeId, page + 1)}
+                    alt={`Original resume page ${page + 1}`}
+                    className="w-full border border-border bg-card shadow-paper"
+                  />
+                ))}
+              </div>
             ) : (
               <ResumePreview resume={resume} zoom={zoom} />
             )}

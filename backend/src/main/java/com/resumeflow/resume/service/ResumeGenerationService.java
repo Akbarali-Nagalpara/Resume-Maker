@@ -79,6 +79,87 @@ public class ResumeGenerationService {
     DocumentType type = DocumentType.valueOf(template.getDocumentType());
     int nextVersion = versionService.nextVersionNumber(resumeId);
 
+    if (type == DocumentType.PDF) {
+      return generatePdf(resume, template, content, nextVersion);
+    }
+    return generateViaPatch(resume, template, content, type, nextVersion);
+  }
+
+  /**
+   * PDF path: unchanged content returns the original bytes untouched
+   * (perfect fidelity); changed content is patched surgically in the
+   * original PDF, with explicit warnings for unpatchable edits.
+   */
+  private GenerateResponse generatePdf(
+      Resume resume, ResumeTemplate template, ResumeContent content, int nextVersion) {
+    java.util.UUID resumeId = resume.getId();
+    try {
+      ResumeFile original = fileRepository
+          .findFirstByResumeIdAndKindOrderByCreatedAtDesc(resumeId, ResumeFileKind.ORIGINAL)
+          .orElseThrow(() -> new IllegalStateException("No original file for " + resumeId));
+      Resource originalResource = storageService.load(original.getStorageKey());
+      byte[] originalBytes;
+      try (InputStream in = originalResource.getInputStream()) {
+        originalBytes = in.readAllBytes();
+      }
+      ResumeContent initial = contentService.initialContent(resumeId);
+      java.util.List<String> warnings = new java.util.ArrayList<>();
+      byte[] bytes;
+      if (canonical(initial.getContent()).equals(canonical(content.getContent()))) {
+        bytes = originalBytes;
+        log.info("No content changes for resume {}; reusing original bytes", resumeId);
+      } else {
+        Path workDir = Files.createTempDirectory("resumeflow-generate-");
+        Path originalCopy = workDir.resolve("original.pdf");
+        Path output = workDir.resolve("generated.pdf");
+        try {
+          Files.write(originalCopy, originalBytes);
+          com.resumeflow.resume.processor.PdfPatchResult result = patchService.patchPdf(
+              originalCopy, initial.getContent(), content.getContent(), output);
+          bytes = Files.readAllBytes(output);
+          for (var warning : result.warnings()) {
+            warnings.add(warning.reason() + ": " + warning.detail());
+          }
+        } finally {
+          Files.deleteIfExists(originalCopy);
+          Files.deleteIfExists(output);
+          Files.deleteIfExists(workDir);
+        }
+      }
+      StoredFile stored = storageService.store(
+          resumeId + "/version-" + nextVersion, "pdf",
+          new ByteArrayInputStream(bytes));
+      fileRepository.save(new ResumeFile(resume, ResumeFileKind.GENERATED,
+          stored.storageKey(), "application/pdf", stored.sizeBytes(), stored.sha256Hex()));
+      var version = versionService.createGeneratedVersion(resume, content.getId(),
+          template.getId(), stored.storageKey(), stored.sha256Hex());
+      log.info("Generated PDF version {} for resume {} ({} warnings)",
+          version.getVersionNumber(), resumeId, warnings.size());
+      return new GenerateResponse(resumeId, version.getVersionNumber(), stored.storageKey(),
+          stored.sha256Hex(), "application/pdf", warnings);
+    } catch (ResumeNotFoundException | ResumeConflictException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new IllegalStateException("Generation failed for resume " + resumeId, e);
+    }
+  }
+
+  private String canonical(tools.jackson.databind.JsonNode node) {
+    try {
+      return objectMapper.writeValueAsString(
+          objectMapper.treeToValue(node, Object.class));
+    } catch (Exception e) {
+      return node == null ? "" : node.toString();
+    }
+  }
+
+  private GenerateResponse generateViaPatch(
+      Resume resume,
+      ResumeTemplate template,
+      ResumeContent content,
+      DocumentType type,
+      int nextVersion) {
+    java.util.UUID resumeId = resume.getId();
     try {
       ResumeFile original = fileRepository
           .findFirstByResumeIdAndKindOrderByCreatedAtDesc(resumeId, ResumeFileKind.ORIGINAL)
@@ -107,7 +188,7 @@ public class ResumeGenerationService {
             template.getId(), stored.storageKey(), stored.sha256Hex());
         log.info("Generated version {} for resume {}", version.getVersionNumber(), resumeId);
         return new GenerateResponse(resumeId, version.getVersionNumber(), stored.storageKey(),
-            stored.sha256Hex(), artifact.mimeType());
+            stored.sha256Hex(), artifact.mimeType(), java.util.List.of());
       } finally {
         Files.deleteIfExists(originalCopy);
         Files.deleteIfExists(output);

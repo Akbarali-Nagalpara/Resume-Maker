@@ -54,13 +54,75 @@ public class PdfResumeParser implements ResumeParser {
     try (PDDocument document = Loader.loadPDF(file.toFile())) {
       PositionCapture capture = new PositionCapture();
       capture.setSortByPosition(true);
-      String text = capture.getText(document);
-      List<String> lines = text.lines().toList();
+      // Trigger positioning; line order below comes from captured blocks,
+      // not the stripper text, so columns never interleave on shared baselines.
+      capture.getText(document);
+      List<String> lines = readingOrderLines(capture.blocks, document);
       return assemble(lines, capture.blocks, document, sourceChecksum);
     } catch (ResumeParseException e) {
       throw e;
     } catch (Exception e) {
       throw new ResumeParseException("Cannot parse PDF resume", e);
+    }
+  }
+
+  /**
+   * Column-aware reading order: blocks are ordered by (page, column, y) and
+   * blank separators are reinserted on large vertical gaps, so two-column
+   * layouts never merge across columns the way raw stripper lines do.
+   */
+  static List<String> readingOrderLines(List<TextBlock> blocks, PDDocument document) {
+    Map<Integer, List<TextBlock>> byPage = new LinkedHashMap<>();
+    for (TextBlock block : blocks) {
+      byPage.computeIfAbsent(block.page(), key -> new ArrayList<>()).add(block);
+    }
+    List<String> lines = new ArrayList<>();
+    for (Map.Entry<Integer, List<TextBlock>> entry : byPage.entrySet().stream()
+        .sorted(Map.Entry.comparingByKey()).toList()) {
+      List<TextBlock> pageBlocks = entry.getValue();
+      assignPageColumns(pageBlocks, document);
+      pageBlocks.sort(java.util.Comparator
+          .comparingInt(TextBlock::column)
+          .thenComparingDouble(TextBlock::y));
+      TextBlock previous = null;
+      for (TextBlock block : pageBlocks) {
+        if (previous != null && previous.column() == block.column()
+            && block.y() - (previous.y() + previous.height()) > gapThreshold(previous)) {
+          lines.add("");
+        }
+        lines.add(block.text());
+        previous = block;
+      }
+      lines.add("");
+    }
+    return lines;
+  }
+
+  private static double gapThreshold(TextBlock previous) {
+    return Math.max(12.0, previous.height() * 1.8);
+  }
+
+  private static void assignPageColumns(List<TextBlock> pageBlocks, PDDocument document) {
+    int columns = detectColumns(pageBlocks);
+    float pageWidth = 595;
+    try {
+      if (!pageBlocks.isEmpty()) {
+        int pageIndex = Math.max(0, pageBlocks.get(0).page() - 1);
+        if (pageIndex < document.getNumberOfPages()) {
+          pageWidth = document.getPage(pageIndex).getMediaBox().getWidth();
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Cannot read page width for columns", e);
+    }
+    for (int i = 0; i < pageBlocks.size(); i++) {
+      TextBlock block = pageBlocks.get(i);
+      int column = 0;
+      if (!(block.width() > 0.6 * pageWidth) && columns == 2) {
+        float center = block.x() + block.width() / 2;
+        column = center < pageWidth / 2 ? 0 : 1;
+      }
+      pageBlocks.set(i, block.withColumn(column));
     }
   }
 
@@ -79,13 +141,14 @@ public class PdfResumeParser implements ResumeParser {
     List<ParsedResume.SectionIndexEntry> index = new ArrayList<>();
     List<TemplateMetadata.SectionAnchor> anchors = new ArrayList<>();
     ObjectNode mappings = objectMapper.createObjectNode();
+    Map<String, Integer> keyCounts = new LinkedHashMap<>();
     int position = 0;
     for (int i = firstHeading; i < docBlocks.size(); i++) {
       Block block = docBlocks.get(i);
       if (!block.heading()) {
         continue;
       }
-      String key = SectionClassifier.classifyHeading(block.title()).orElseGet(
+      String base = SectionClassifier.classifyHeading(block.title()).orElseGet(
           () -> "custom-" + block.title().toLowerCase().replaceAll("[^a-z0-9]+", "-"));
       List<String> sectionLines = new ArrayList<>(block.lines());
       List<String> nodeIds = new ArrayList<>(block.nodeIds());
@@ -93,6 +156,22 @@ public class PdfResumeParser implements ResumeParser {
         sectionLines.addAll(docBlocks.get(j).lines());
         nodeIds.addAll(docBlocks.get(j).nodeIds());
       }
+      if (sections.containsKey(base) && KNOWN_SECTION_KEYS.contains(base)) {
+        // Repeated known section merges into the first: no content lost,
+        // one deterministic key.
+        SectionBody existing = sections.get(base);
+        existing.lines().addAll(sectionLines);
+        existing.nodeIds().addAll(nodeIds);
+        mappings.put(base, String.join(",", existing.nodeIds()));
+        continue;
+      }
+      int count = keyCounts.merge(base, 1, Integer::sum);
+      String key = count == 1 ? base : base + "-" + count;
+      while (sections.containsKey(key)) {
+        count++;
+        key = base + "-" + count;
+      }
+      keyCounts.put(base, count);
       sections.put(key, new SectionBody(sectionLines, nodeIds));
       titles.put(key, block.title());
       String nodeRef = String.join(",", nodeIds);
@@ -114,21 +193,30 @@ public class PdfResumeParser implements ResumeParser {
     String phone = null;
     String location = null;
     String website = null;
+    String github = null;
+    String linkedin = null;
     for (int i = 1; i < lines.size(); i++) {
       String line = lines.get(i);
-      if (line.contains("@") || SectionClassifier.parseContactLine(line).phone() != null) {
-        SectionClassifier.ContactParts parts = SectionClassifier.parseContactLine(line);
+      SectionClassifier.ContactParts parts = SectionClassifier.parseContactLine(line);
+      if (line.contains("@") || parts.phone() != null || parts.github() != null
+          || parts.linkedin() != null || parts.website() != null) {
         if (parts.email() != null) {
           email = parts.email();
         }
         if (parts.phone() != null) {
           phone = parts.phone();
         }
+        if (parts.github() != null) {
+          github = parts.github();
+        }
+        if (parts.linkedin() != null) {
+          linkedin = parts.linkedin();
+        }
         if (parts.website() != null) {
           website = parts.website();
         }
         if (parts.location() != null) {
-          location = parts.location();
+          location = location == null ? parts.location() : location + ", " + parts.location();
         }
       } else if (title == null) {
         title = line;
@@ -136,7 +224,12 @@ public class PdfResumeParser implements ResumeParser {
         location = line;
       }
     }
-    return new PersonalInfo(name, title, email, phone, location, website);
+    return new PersonalInfo(name, title, email, phone, location, website, github, linkedin);
+  }
+
+  private DocxResumeParser.SectionBody toSharedBody(SectionBody body) {
+    return new DocxResumeParser.SectionBody(
+        new java.util.ArrayList<>(body.lines()), new java.util.ArrayList<>(body.nodeIds()));
   }
 
   private ResumeContentModel buildContent(
@@ -148,30 +241,31 @@ public class PdfResumeParser implements ResumeParser {
     List<String> skills = new ArrayList<>();
     for (String line : sections.getOrDefault("skills", new SectionBody(List.of(), List.of()))
         .lines()) {
-      skills.addAll(SectionClassifier.splitSkills(line));
-    }
-    List<ExperienceItem> experience = new ArrayList<>();
-    List<List<String>> expGroups = DocxResumeParser.groupExperienceLines(
-        sections.getOrDefault("experience", new SectionBody(List.of(), List.of())).lines());
-    for (int i = 0; i < expGroups.size(); i++) {
-      experience.add(toExperience(expGroups.get(i), i));
-    }
-    List<ProjectItem> projects = new ArrayList<>();
-    int projCounter = 0;
-    for (List<String> group : groupBlocks(
-        sections.getOrDefault("projects", new SectionBody(List.of(), List.of())).lines())) {
-      if (!group.isEmpty()) {
-        projects.add(toProject(group, projCounter++));
+      String stripped = line.strip();
+      if (stripped.endsWith(":") && stripped.length() < 30) {
+        if (!skills.contains(stripped)) {
+          skills.add(stripped);
+        }
+      } else {
+        for (String skill : SectionClassifier.splitSkills(line)) {
+          if (!skills.contains(skill)) {
+            skills.add(skill);
+          }
+        }
       }
     }
-    List<EducationItem> education = new ArrayList<>();
-    List<String> eduLines =
-        sections.getOrDefault("education", new SectionBody(List.of(), List.of())).lines();
-    if (!eduLines.isEmpty()) {
-      education.add(new EducationItem("education-1", eduLines.get(0),
-          eduLines.size() > 1 ? eduLines.get(1) : null,
-          eduLines.size() > 2 ? eduLines.get(eduLines.size() - 1) : null));
-    }
+    List<ExperienceItem> experience = DocxResumeParser.parseExperience(
+        toSharedBody(sections.getOrDefault("experience",
+            new SectionBody(List.of(), List.of()))),
+        mappings);
+    List<ProjectItem> projects = DocxResumeParser.parseProjects(
+        toSharedBody(
+            sections.getOrDefault("projects", new SectionBody(List.of(), List.of()))),
+        mappings);
+    List<EducationItem> education = DocxResumeParser.parseEducation(
+        toSharedBody(sections.getOrDefault("education",
+            new SectionBody(List.of(), List.of()))),
+        mappings);
     List<ResumeContentModel.AdditionalSection> additional = new ArrayList<>();
     sections.forEach((key, body) -> {
       if (!List.of("summary", "skills", "experience", "projects", "education").contains(key)) {
@@ -182,66 +276,6 @@ public class PdfResumeParser implements ResumeParser {
     mappings.put("personal.name", "l1");
     return new ResumeContentModel(personal, String.join("\n", summary.lines()),
         skills.stream().distinct().toList(), experience, projects, education, additional);
-  }
-
-  private ExperienceItem toExperience(List<String> group, int counter) {
-    String heading = group.get(0);
-    String role = heading;
-    String company = null;
-    String[] split = heading.split("\\s+@\\s+|\\s+[—–-]\\s+|\\s*,\\s*", 2);
-    if (split.length == 2) {
-      role = split[0].trim();
-      company = split[1].trim();
-    }
-    String dates = null;
-    List<String> bullets = new ArrayList<>();
-    for (int i = 1; i < group.size(); i++) {
-      String line = group.get(i);
-      if (dates == null && SectionClassifier.containsDateRange(line) && line.length() < 60) {
-        dates = line;
-      } else if (SectionClassifier.isBullet(line)) {
-        bullets.add(SectionClassifier.stripBullet(line));
-      } else if (!line.isBlank()) {
-        bullets.add(line);
-      }
-    }
-    return new ExperienceItem("exp-" + (counter + 1), role, company, null, dates, bullets);
-  }
-
-  private ProjectItem toProject(List<String> group, int counter) {
-    String name = group.get(0);
-    String stack = null;
-    List<String> description = new ArrayList<>();
-    for (int i = 1; i < group.size(); i++) {
-      String line = SectionClassifier.isBullet(group.get(i))
-          ? SectionClassifier.stripBullet(group.get(i))
-          : group.get(i);
-      if (i == group.size() - 1 && line.matches("(?i).*[·|/,].*") && line.length() < 120) {
-        stack = line;
-      } else {
-        description.add(line);
-      }
-    }
-    return new ProjectItem("project-" + (counter + 1), name, String.join(" ", description), stack);
-  }
-
-  private static List<List<String>> groupBlocks(List<String> lines) {
-    List<List<String>> groups = new ArrayList<>();
-    List<String> current = new ArrayList<>();
-    boolean seenBullet = false;
-    for (String line : lines) {
-      boolean bullet = SectionClassifier.isBullet(line);
-      if (!bullet && seenBullet && !current.isEmpty()) {
-        groups.add(current);
-        current = new ArrayList<>();
-        seenBullet = false;
-      }
-      current.add(line);
-    }
-    if (!current.isEmpty()) {
-      groups.add(current);
-    }
-    return groups;
   }
 
   private TemplateMetadata buildTemplate(
@@ -283,6 +317,7 @@ public class PdfResumeParser implements ResumeParser {
       node.put("height", block.height());
       node.put("font", block.font());
       node.put("fontSize", block.fontSize());
+      node.put("column", block.column());
       node.put("text", block.text());
       blockNodes.add(node);
     }
@@ -291,6 +326,9 @@ public class PdfResumeParser implements ResumeParser {
     properties.set("fonts", fontNodes);
     properties.set("blocks", blockNodes);
     properties.put("sampledBlocks", Math.min(blocks.size(), MAX_TEMPLATE_BLOCKS));
+    properties.put("columns", detectColumns(blocks));
+    properties.put("images", countImages(document));
+    properties.put("tables", 0);
     return new TemplateMetadata(DocumentType.PDF, sourceChecksum,
         new TemplateMetadata.PageGeometry(width, height, 72, 72, 72, 72),
         anchors, mappings, properties);
@@ -318,9 +356,7 @@ public class PdfResumeParser implements ResumeParser {
         }
         continue;
       }
-      boolean keyword = SectionClassifier.classifyHeading(line).isPresent();
-      boolean shaped = SectionClassifier.looksLikeHeading(line);
-      boolean heading = shaped && (keyword || seenKnownSection);
+      boolean heading = SectionClassifier.isSectionHeading(line, false, seenKnownSection);
       if (heading && (seenAnyContent || title != null || !lines.isEmpty())) {
         if (title != null || !lines.isEmpty()) {
           blocks.add(new Block(title, List.copyOf(lines), List.copyOf(nodeIds), headingBlock));
@@ -331,9 +367,7 @@ public class PdfResumeParser implements ResumeParser {
         nodeIds.add("l" + lineNumber);
         headingBlock = true;
         seenAnyContent = true;
-        if (keyword) {
-          seenKnownSection = true;
-        }
+        seenKnownSection = true;
       } else {
         lines.add(line);
         nodeIds.add("l" + lineNumber);
@@ -346,8 +380,39 @@ public class PdfResumeParser implements ResumeParser {
     return blocks;
   }
 
-  private int firstHeadingIndex(List<Block> blocks) {
-    for (int i = 0; i < blocks.size(); i++) {
+  private static int detectColumns(List<TextBlock> blocks) {
+    if (blocks.size() < 6) {
+      return 1;
+    }
+    List<Float> xs = blocks.stream().map(TextBlock::x).sorted().toList();
+    float bestGap = 0;
+    for (int i = 0; i + 1 < xs.size(); i++) {
+      bestGap = Math.max(bestGap, xs.get(i + 1) - xs.get(i));
+    }
+    return bestGap > 100 ? 2 : 1;
+  }
+
+  private static int countImages(PDDocument document) {
+    int count = 0;
+    try {
+      for (PDPage page : document.getPages()) {
+        if (page.getResources() == null) {
+          continue;
+        }
+        for (var name : page.getResources().getXObjectNames()) {
+          if (page.getResources().getXObject(name)
+              instanceof org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject) {
+            count++;
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Cannot count PDF images", e);
+    }
+    return count;
+  }
+
+  private int firstHeadingIndex(List<Block> blocks) {    for (int i = 0; i < blocks.size(); i++) {
       if (blocks.get(i).heading()) {
         return i;
       }
@@ -361,9 +426,17 @@ public class PdfResumeParser implements ResumeParser {
   private record SectionBody(List<String> lines, List<String> nodeIds) {
   }
 
+  /** Section keys with fixed model fields; repeats merge instead of colliding. */
+  private static final Set<String> KNOWN_SECTION_KEYS =
+      Set.of("summary", "skills", "experience", "projects", "education");
+
   private record TextBlock(
       String id, int page, float x, float y, float width, float height, String font,
-      float fontSize, String text) {
+      float fontSize, String text, int column) {
+
+    TextBlock withColumn(int column) {
+      return new TextBlock(id, page, x, y, width, height, font, fontSize, text, column);
+    }
   }
 
   private static class PositionCapture extends PDFTextStripper {
@@ -388,7 +461,7 @@ public class PdfResumeParser implements ResumeParser {
       float width = (last.getXDirAdj() + last.getWidthDirAdj()) - x;
       blocks.add(new TextBlock("t" + (counter++), getCurrentPageNo(), x, y,
           Math.max(width, 0), first.getHeightDir(),
-          first.getFont().getName(), first.getFontSizeInPt(), text.trim()));
+          first.getFont().getName(), first.getFontSizeInPt(), text.trim(), 0));
     }
   }
 }
