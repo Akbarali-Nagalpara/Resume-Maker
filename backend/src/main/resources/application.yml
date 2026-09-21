@@ -1,0 +1,54 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:resumeflow}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 10
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  servlet:
+    multipart:
+      max-file-size: ${MAX_RESUME_SIZE_MB:10}MB
+      max-request-size: ${MAX_RESUME_SIZE_MB:10}MB
+
+resumeflow:
+  storage:
+    path: ${RESUMEFLOW_STORAGE_PATH:./storage}
+  upload:
+    max-size-mb: ${MAX_RESUME_SIZE_MB:10}
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:3000,http://localhost:8080}
+
+document-processor:
+  base-url: ${DOC_PROCESSOR_URL:http://127.0.0.1:8001}
+  enabled: ${DOC_PROCESSOR_ENABLED:true}
+  timeout-seconds: ${DOC_PROCESSOR_TIMEOUT_S:120}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when-authorized
+  health:
+    db:
+      enabled: true
+    redis:
+      enabled: true
+
+logging:
+  level:
+    com.resumeflow: INFO
+    org.hibernate.SQL: WARN
